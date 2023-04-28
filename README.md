@@ -1,6 +1,6 @@
 # DAVA: Disentangling Adversarial Variational Autoencoder
 ## Description
-This code supports the NeurIPS 2022 Submission DAVA: Disentangling Adversarial Variational Autoencoder
+This code supports the ICLR 2023 Submission DAVA: Disentangling Adversarial Variational Autoencoder
 
 ## Getting Started
 ### Dependencies

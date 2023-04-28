@@ -1,0 +1,103 @@
+import argparse
+import gin
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+import numpy.typing as npt
+
+from dava.models import BetaTCVAE
+from dava.utils import *
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--num_steps", type=int, default=300000)
+    parser.add_argument("--dataset_path", type=str)
+    parser.add_argument("--num_channels", type=int, default=1)
+    parser.add_argument("--store_path", type=str)
+    parser.add_argument("--learning_rate", type=float, default=0.0001)
+    parser.add_argument("--z_dim", type=int, default=10)
+    parser.add_argument("--random_seed", type=int, default=0)
+    parser.add_argument("--beta", type=int, default=10)
+    parser.add_argument("--batch_norm", action='store_true')
+    parser.add_argument("--spectral_norm", action='store_true')
+    parser.add_argument("--layer_norm", action='store_true')
+    parser.add_argument("--instance_norm", action='store_true')
+    parser.add_argument("--max_grad_norm", type=float, default=1.)
+    parser.add_argument("--annealed_loss_degree", type=int, default=0)
+
+    args = parser.parse_args()
+
+    init_random_state(args.random_seed)
+    dataset_path = args.dataset_path
+    num_channels = args.num_channels
+    print("Loading Dataset")
+    dataset = np.load(dataset_path)["images"]
+    print("Finished loading Dataset")
+    device = torch.device(args.device)
+    batch_size = args.batch_size
+    num_steps = args.num_steps * 64
+    learning_rate = args.learning_rate
+    z_dim = args.z_dim
+    beta = args.beta
+    store_path = args.store_path
+    use_batch_norm = args.batch_norm
+    use_spectral_norm = args.spectral_norm
+    use_layer_norm = args.layer_norm
+    use_instance_norm = args.instance_norm
+    max_grad_norm = args.max_grad_norm
+    model_scale_factor = args.model_scale_factor
+
+    prepare_store_path(store_path, dataset_path, num_channels, z_dim)
+    store_dict(args.__dict__, os.path.join(store_path, "parameters.txt"))
+    vae = BetaTCVAE(z_dim=z_dim, num_channels=num_channels, beta=beta,
+                    use_batch_norm=use_batch_norm, use_spectral_norm=use_spectral_norm,
+                    use_layer_norm=use_layer_norm, use_instance_norm=use_instance_norm,
+                    scale_factor=model_scale_factor).to(device)
+
+    train_beta_tcvae(vae, dataset, device, store_path=store_path, batch_size=batch_size, num_steps=num_steps,
+                     learning_rate=learning_rate, max_grad_norm=max_grad_norm)
+
+
+def train_beta_tcvae(vae: BetaTCVAE, data: npt.ArrayLike, device, store_path: str, batch_size=32,
+                     num_steps=5, learning_rate=1e-4, max_grad_norm=1.):
+    print("Start Beta-TCVAE training")
+    data_loader = DataLoader(data, batch_size=batch_size, pin_memory=True,
+                             drop_last=True, shuffle=True, num_workers=0)
+    opt_enc = optim.Adam(vae.encoder.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=1e-08)
+    opt_dec = optim.Adam(vae.decoder.parameters(), lr=learning_rate, betas=(0.9, 0.999), eps=1e-08)
+
+    running_loss_vae = 0.0
+    current_step = 0
+
+    end_reached = False
+    while not end_reached:
+        for i, x in enumerate(data_loader):
+            current_step += batch_size
+            if current_step > num_steps:
+                end_reached = True
+                break
+
+            vae.train()
+
+            # train vae reconstruction loss + KL
+            vae.zero_grad()
+            x = x.to(device)
+            x = x.type(torch.float32) / 255.
+            _, _, vae_loss = vae(x, current_step)
+            vae_loss.backward()
+            torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=max_grad_norm)
+            opt_enc.step()
+            opt_dec.step()
+            running_loss_vae += vae_loss.detach().mean()
+
+        save_checkpoint(vae, path=store_path)
+
+    print("Finished Training")
+    save_checkpoint(vae, path=store_path)
+
+
+if __name__ == '__main__':
+    main()
